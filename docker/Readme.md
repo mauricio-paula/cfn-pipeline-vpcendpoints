@@ -10,7 +10,7 @@ em cada diretório faça:
 # Configuração da Policy no ECR
 Para que o CodeBuild tenha permissão de fazer o pull das imagens é necessário cria uma policy em cada repositório do ECR, conforme abaixo:
 
-`
+``````````
 {
   "Version": "2008-10-17",
   "Statement": [
@@ -32,4 +32,4 @@ Para que o CodeBuild tenha permissão de fazer o pull das imagens é necessário
     }
   ]
 }
-`
+``````````
