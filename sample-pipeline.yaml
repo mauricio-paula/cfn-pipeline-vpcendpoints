@@ -1,0 +1,125 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Parameters:
+  PrivateSubNet1:
+    Type: String
+    Default: '10.0.100.0/24'
+  PrivateSubNet2:
+    Type: String
+    Default: '10.0.101.0/24'
+  VPCCIDR:
+    Type: 'String'
+    Default: '10.0.0.0/16'
+  Product:
+    Type: 'String'
+    Default: 'Sonar'
+
+
+Resources:
+
+  VPCSonar:
+    Type: AWS::EC2::VPC
+    Properties:
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      CidrBlock: !Ref VPCCIDR
+      Tags:
+        - Key: Product
+          Value: !Ref Product
+
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Select
+        - 0
+        - Fn::GetAZs: !Ref "AWS::Region"
+      VpcId: !Ref VPCSonar
+      CidrBlock: !Ref PrivateSubNet1
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Select
+        - 1
+        - Fn::GetAZs: !Ref "AWS::Region"
+      VpcId: !Ref VPCSonar
+      CidrBlock: !Ref PrivateSubNet2
+
+  SgVPCEndpoints:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      Tags:
+      - Key: Product
+        Value: !Ref Product
+      VpcId: !Ref VPCSonar
+      GroupDescription: This security group is used to control access to the container
+      SecurityGroupIngress:
+      - IpProtocol: TCP
+        FromPort: 0
+        ToPort: 65535
+        CidrIp: 0.0.0.0/0
+
+  VPCEndpointS3:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.s3
+      VpcEndpointType: Gateway
+      VpcId: !Ref VPCSonar
+      RouteTableIds:
+        - !Ref PrivateRouteTable1
+        - !Ref PrivateRouteTable2
+
+  VPCEndpointCloudwatchLogs:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      PrivateDnsEnabled: true
+      SecurityGroupIds:
+      - Ref: SgVPCEndpoints
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.logs
+      SubnetIds:
+      - !Ref PrivateSubnet1
+      - !Ref PrivateSubnet2
+      VpcEndpointType: Interface
+      VpcId: !Ref VPCSonar
+
+
+
+  PrivateRouteTable1:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPCSonar
+
+  PrivateRouteTable1Association:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable1
+      SubnetId: !Ref PrivateSubnet1
+
+  PrivateRouteTable2:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPCSonar
+
+  PrivateRouteTable2Association:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable2
+      SubnetId: !Ref PrivateSubnet2
+
+Outputs:
+  VPCIDExport:
+    Value: !Ref VPCSonar
+    Export:
+      Name: !Sub "${AWS::StackName}-VPCID"
+  PrivateSubnet1Export:
+    Value: !Ref PrivateSubnet1
+    Export: 
+      Name: !Sub "${AWS::StackName}-PrivateSubnet1"
+  PrivateSubnet2Export:
+    Value: !Ref PrivateSubnet2
+    Export:
+      Name: !Sub "${AWS::StackName}-PrivateSubnet2"
+  SecurityGroupExport:
+    Value: !Ref SgVPCEndpoints
+    Export:
+      Name: !Sub "${AWS::StackName}-SgVPCEndpoints"
