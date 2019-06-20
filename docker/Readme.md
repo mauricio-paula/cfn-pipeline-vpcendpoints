@@ -7,10 +7,10 @@ em cada diretório faça:
 `docker push <accountID>.dkr.ecr.<region>.amazonaws.com/<nome_da_imagem>:latest`
 
 
+# Configuração da Policy no ECR
 Para que o CodeBuild tenha permissão de fazer o pull das imagens é necessário cria uma policy em cada repositório do ECR, conforme abaixo:
 
 `
-
 {
   "Version": "2008-10-17",
   "Statement": [
