@@ -37,3 +37,31 @@ Para que o CodeBuild tenha permissão de fazer o pull das imagens é necessário
   ]
 }
 ``````````
+
+Trecho de código do Cloudformation para criação do repositório ECR
+
+`````````````
+ECRPython: 
+  Type: AWS::ECR::Repository
+  Properties: 
+    RepositoryName: "python"
+    RepositoryPolicyText: 
+      Version: "2012-10-17"
+      Statement: 
+        - 
+          Sid: AllowPushPull
+          Effect: Allow
+          Principal: 
+            Service: 
+              - "codebuild.amazonaws.com"
+          Action: 
+            - "ecr:GetDownloadUrlForLayer"
+            - "ecr:BatchGetImage"
+            - "ecr:BatchCheckLayerAvailability"
+            - "ecr:CompleteLayerUpload"
+            - "ecr:DescribeImages"
+            - "ecr:DescribeRepositories"
+            - "ecr:GetLifecyclePolicy"
+            - "ecr:GetLifecyclePolicyPreview"
+            - "ecr:GetRepositoryPolicy"
+`````````````
