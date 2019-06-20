@@ -3,9 +3,11 @@
 Este diretório possui os arquivos Dockerfile usados para gerar as imagens de container customizadas para o CodeBuild.
 
 em cada diretório faça:
+### Para criar a imagem 
 
 `docker build -t <accountID>.dkr.ecr.<region>.amazonaws.com/<nome_da_imagem> .`
 
+### Para fazer o push da imagem para o ECR
 `docker push <accountID>.dkr.ecr.<region>.amazonaws.com/<nome_da_imagem>:latest`
 
 
