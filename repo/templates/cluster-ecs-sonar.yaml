@@ -1,0 +1,348 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Create ECS Cluster
+
+Parameters:
+  ClusterName:
+    Description: Cluster name
+    Type: String
+    Default: 'teste-cluster'
+  EC2InstanceType:
+    Type: String
+    Default: t2.medium
+    Description: EC2 instance type
+  ClusterSize:
+    Type: Number
+    Default: 2
+    Description: Number of EC2 instances comprising the ECS cluster
+
+  ListenPort:
+    Description: Listening port for container
+    Type: Number
+    Default: 9000
+
+  DesiredCount:
+    Description: Number of tasks to launch for the service
+    Type: Number
+    Default: 2
+    MinValue: 1
+
+  ContainerName:
+    Description: Container Name
+    Type: String
+    Default: 'sonar'
+
+    
+Resources:
+
+  ECSCluster:
+    Type: "AWS::ECS::Cluster"
+    Properties:
+      ClusterName: !Ref ClusterName
+
+  ContainerInstanceLaunchConfig:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties:
+      AssociatePublicIpAddress: false
+      IamInstanceProfile: !Ref EcsInstanceProfile
+      ImageId: 'ami-05b4cc63e533b002a'
+      InstanceMonitoring: true
+      InstanceType: !Ref EC2InstanceType
+      SecurityGroups: 
+        - !Ref InstanceSecurityGroup
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash -ex
+          echo "ECS_CLUSTER=${ClusterName}" >> /etc/ecs/ecs.config
+          #yum install -y https://s3.amazonaws.com/ec2-downloads-windows/SSMAgent/latest/linux_amd64/amazon-ssm-agent.rpm \
+          #               aws-cfn-bootstrap
+          systemctl enable amazon-ssm-agent
+          systemctl start amazon-ssm-agent
+          /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource ContainerInstanceAutoScalingGroup --region ${AWS::Region}
+
+  ContainerInstanceAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      DesiredCapacity: !Ref ClusterSize
+      MaxSize: !Ref ClusterSize
+      MinSize: "1"
+      HealthCheckType: EC2
+      LaunchConfigurationName: !Ref ContainerInstanceLaunchConfig
+      Tags:
+        - Key: Name
+          Value: !Sub "ecs-instance-${ClusterName}"
+          PropagateAtLaunch: true
+      VPCZoneIdentifier:
+        - !ImportValue vpc-sonar-PrivateSubnet1
+        - !ImportValue vpc-sonar-PrivateSubnet2
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: PT10M
+    UpdatePolicy:
+      AutoScalingRollingUpdate:
+        MaxBatchSize: 1
+        MinInstancesInService: 1
+        MinSuccessfulInstancesPercent: 100
+        PauseTime: PT10M
+
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Join ['-', [SonarTaskDefinition, !Ref 'AWS::StackName']]
+      ContainerDefinitions:
+      - Name: !Sub task-${ContainerName}
+        Cpu: 1024
+        Essential: true
+        Image: '341071025030.dkr.ecr.sa-east-1.amazonaws.com/sonarqube:latest'
+        Memory: 2048
+        Environment:
+            - Name: PORT
+              Value: !Ref ListenPort
+        LogConfiguration:
+          LogDriver: awslogs
+          Options:
+            awslogs-group: !Ref 'CloudwatchLogsGroup'
+            awslogs-region: !Ref 'AWS::Region'
+            awslogs-stream-prefix: sonar
+        PortMappings:
+        - ContainerPort: 9000
+          HostPort: 9000
+          Protocol: tcp
+
+  CloudwatchLogsGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Join ['-', [ECSLogGroup, !Ref 'AWS::StackName']]
+      RetentionInDays: 14
+
+  Service:
+    Type: "AWS::ECS::Service"
+    Properties:
+      ServiceName: !Sub service-${ContainerName}
+      Cluster: !Ref ClusterName
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 100
+        MaximumPercent: 200
+      DesiredCount: !Ref DesiredCount
+      HealthCheckGracePeriodSeconds: 120
+      LaunchType: EC2
+      LoadBalancers:
+        - ContainerName: !Sub task-${ContainerName}
+          ContainerPort: !Ref ListenPort
+          TargetGroupArn: !Ref TargetGroup
+      SchedulingStrategy: REPLICA
+      TaskDefinition: !Ref TaskDefinition
+
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Scheme: internal
+      Type: network
+      Subnets:
+        - !ImportValue vpc-sonar-PrivateSubnet1
+        - !ImportValue vpc-sonar-PrivateSubnet2
+
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    DependsOn: LoadBalancer
+    Properties:
+      TargetType: instance
+      Port: 9000
+      Protocol: TCP
+      VpcId: !ImportValue vpc-sonar-VPCID
+
+  Listener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref 'TargetGroup'
+      LoadBalancerArn: !Ref 'LoadBalancer'
+      Port: 80
+      Protocol: TCP
+
+  ScalingRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+                - application-autoscaling.amazonaws.com
+            Action: ["sts:AssumeRole"]
+      Policies:
+        - PolicyName: adjust-service-desired-count
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action: ecs:UpdateService
+                Resource: !Ref Service
+
+  ScalableTarget:
+    Type: "AWS::ApplicationAutoScaling::ScalableTarget"
+    Properties:
+      MaxCapacity: 1000
+      MinCapacity: 3
+      ResourceId: !Join
+        - "/"
+        - - service
+          - !Ref ClusterName
+          - !GetAtt Service.Name
+      RoleARN: !GetAtt ScalingRole.Arn
+      ScalableDimension: ecs:service:DesiredCount
+      ServiceNamespace: ecs
+
+  ScalingPolicy:
+    Type: "AWS::ApplicationAutoScaling::ScalingPolicy"
+    Properties:
+      PolicyName: ScaleWithCpu
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref ScalableTarget
+      TargetTrackingScalingPolicyConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageCPUUtilization
+        TargetValue: 80
+
+  AutoScalingRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: [application-autoscaling.amazonaws.com]
+            Action: ["sts:AssumeRole"]
+      Path: /
+      Policies:
+        - PolicyName: service-autoscaling
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cloudwatch:DescribeAlarms
+                  - cloudwatch:PutMetricAlarm
+                  - ecs:DescribeServices
+                  - ecs:UpdateService
+                Resource: "*"
+
+  EcsServiceRole:
+    Type: AWS::IAM::Role
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: F3
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: [ecs.amazonaws.com]
+            Action: ["sts:AssumeRole"]
+      Path: /
+      Policies:
+        - PolicyName: ecs-service
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:AuthorizeSecurityGroupIngress
+                  - ec2:Describe*
+                  - elasticloadbalancing:DeregisterInstancesFromLoadBalancer
+                  - elasticloadbalancing:DeregisterTargets
+                  - elasticloadbalancing:Describe*
+                  - elasticloadbalancing:RegisterInstancesWithLoadBalancer
+                  - elasticloadbalancing:RegisterTarget
+                Resource: "*"
+
+  EcsInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: [ec2.amazonaws.com]
+            Action: ["sts:AssumeRole"]
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforSSM
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role
+        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+      Path: /
+      Policies:
+        - PolicyName: signal-cloudformation
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cloudformation:DescribeStackResource
+                  - cloudformation:SignalResource
+                Resource: "*"
+
+  EcsInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: /
+      Roles:
+        - !Ref EcsInstanceRole
+
+  InstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow all egress
+      VpcId: !ImportValue vpc-sonar-VPCID
+      SecurityGroupIngress:
+        - SourceSecurityGroupId: !Ref PublicLoadBalancerSG
+          IpProtocol: tcp
+          FromPort: 1024
+          ToPort: 65535
+      SecurityGroupEgress:
+        - CidrIp: 0.0.0.0/0
+          IpProtocol: "-1"
+
+  PublicLoadBalancerSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Access to the public facing load balancer
+      VpcId: !ImportValue vpc-sonar-VPCID
+      SecurityGroupIngress:
+        - CidrIp: 0.0.0.0/0
+          IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+      SecurityGroupEgress:
+        - CidrIp: 0.0.0.0/0
+          IpProtocol: "-1"
+
+  EcsSecurityGroupHTTPItau:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref 'SonarSecurityGroup'
+      IpProtocol: tcp
+      FromPort: 9000
+      ToPort: 9000
+      CidrIp: !ImportValue vpc-sonar-PrivateSubNet1CIDR
+  EcsSecurityGroupIngressFromSelf:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Ingress from other containers in the same security group
+      GroupId: !Ref 'SonarSecurityGroup'
+      FromPort: 9000
+      ToPort: 9000
+      IpProtocol: '-1'
+      SourceSecurityGroupId: !Ref 'SonarSecurityGroup'
+
+  SonarSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: F1000
+    Properties:
+      GroupName: !Join ['-', [SonarSecurityGroup, !Ref 'AWS::StackName']]
+      GroupDescription: ECS Sonar Security Group
+      VpcId: !ImportValue vpc-sonar-VPCID
+      Tags:
+        - Key: Server
+          Value: Sonar

@@ -1,125 +1,222 @@
-AWSTemplateFormatVersion: '2010-09-09'
+AWSTemplateFormatVersion: "2010-09-09" 
+ 
+ 
+Resources: 
+  ArtifactBucket: 
+    Type: AWS::S3::Bucket 
+    DeletionPolicy: Retain 
+ 
+  PipelineInfra:  
+    Type: AWS::CodePipeline::Pipeline 
+    Properties: 
+      RoleArn: !GetAtt PipelineRoleTeste.Arn
+      Name: !Ref AWS::StackName 
+      ArtifactStore: 
+        Type: S3 
+        Location: !Ref ArtifactBucket 
+      Stages:  
+        - Name: Source 
+          Actions: 
+            - Name: Source 
+              ActionTypeId: 
+                Category: Source 
+                Owner: AWS 
+                Version: "1" 
+                Provider: CodeCommit 
+              Configuration: 
+                BranchName: master 
+                RepositoryName: teste 
+              OutputArtifacts: 
+                - Name: Out-Source 
+              RunOrder: 1 
+        - Name: Test 
+          Actions: 
+            - Name: Cfn-Lint 
+              ActionTypeId: 
+                  Category: Build 
+                  Owner: AWS 
+                  Version: "1" 
+                  Provider: CodeBuild 
+              OutputArtifacts: 
+                - Name: Out-Cfn-Lint 
+              InputArtifacts: 
+                - Name: Out-Source 
+              Configuration: 
+                  ProjectName: !Ref CfnLint 
+              RunOrder: 1 
+            - Name: Cfn_Nag 
+              ActionTypeId: 
+                  Category: Build 
+                  Owner: AWS 
+                  Version: "1" 
+                  Provider: CodeBuild 
+              OutputArtifacts: 
+                - Name: Out-Cfn-Nag 
+              InputArtifacts: 
+                - Name: Out-Source 
+              Configuration: 
+                  ProjectName: !Ref CfnNag 
+              RunOrder: 1 
+        - Name: Deploy 
+          Actions: 
+            - Name: SonarDB-CreateChangeSet 
+              ActionTypeId: 
+                Category: Deploy 
+                Owner: AWS 
+                Provider: CloudFormation 
+                Version: "1" 
+              Configuration: 
+                ActionMode: CHANGE_SET_REPLACE  
+                Capabilities: CAPABILITY_IAM 
+                StackName: SonarDB 
+                ChangeSetName: SonarDB-ChangeSet 
+                TemplatePath: !Join [ "::", [ "Out-Source", "templates/infra-sonar-database.yaml"]] 
+                RoleArn: !GetAtt PipelineRoleTeste.Arn
+              InputArtifacts: 
+                - Name: Out-Source 
+              RunOrder: 1 
+            - Name: SonarDB-ExecuteChangeSet 
+              ActionTypeId: 
+                Category: Deploy 
+                Owner: AWS 
+                Provider: CloudFormation 
+                Version: '1' 
+              Configuration: 
+                ActionMode: CHANGE_SET_EXECUTE 
+                ChangeSetName: SonarDB-ChangeSet 
+                StackName: SonarDB 
+                RoleArn: !GetAtt PipelineRoleTeste.Arn
+              RunOrder: 2 
+            - Name: SonarApp-CreateChangeSet 
+              ActionTypeId: 
+                Category: Deploy 
+                Owner: AWS 
+                Provider: CloudFormation 
+                Version: "1" 
+              Configuration: 
+                ActionMode: CHANGE_SET_REPLACE  
+                Capabilities: CAPABILITY_IAM 
+                StackName: SonarApp
+                ChangeSetName: SonarApp-ChangeSet 
+                TemplatePath: !Join [ "::", [ "Out-Source", "templates/cluster-ecs-sonar.yaml"]] 
+                RoleArn: !GetAtt PipelineRoleTeste.Arn
+              InputArtifacts: 
+                - Name: Out-Source 
+              RunOrder: 3
+            - Name: SonarApp-ExecuteChangeSet 
+              ActionTypeId: 
+                Category: Deploy 
+                Owner: AWS 
+                Provider: CloudFormation 
+                Version: '1' 
+              Configuration: 
+                ActionMode: CHANGE_SET_EXECUTE 
+                ChangeSetName: SonarApp-ChangeSet 
+                StackName: SonarApp
+                RoleArn: !GetAtt PipelineRoleTeste.Arn
+              RunOrder: 4
 
-Parameters:
-  PrivateSubNet1:
-    Type: String
-    Default: '10.0.100.0/24'
-  PrivateSubNet2:
-    Type: String
-    Default: '10.0.101.0/24'
-  VPCCIDR:
-    Type: 'String'
-    Default: '10.0.0.0/16'
-  Product:
-    Type: 'String'
-    Default: 'Sonar'
 
-
-Resources:
-
-  VPCSonar:
-    Type: AWS::EC2::VPC
-    Properties:
-      EnableDnsSupport: true
-      EnableDnsHostnames: true
-      CidrBlock: !Ref VPCCIDR
-      Tags:
-        - Key: Product
-          Value: !Ref Product
-
-  PrivateSubnet1:
-    Type: AWS::EC2::Subnet
-    Properties:
-      AvailabilityZone: !Select
-        - 0
-        - Fn::GetAZs: !Ref "AWS::Region"
-      VpcId: !Ref VPCSonar
-      CidrBlock: !Ref PrivateSubNet1
-
-  PrivateSubnet2:
-    Type: AWS::EC2::Subnet
-    Properties:
-      AvailabilityZone: !Select
-        - 1
-        - Fn::GetAZs: !Ref "AWS::Region"
-      VpcId: !Ref VPCSonar
-      CidrBlock: !Ref PrivateSubNet2
-
-  SgVPCEndpoints:
-    Type: AWS::EC2::SecurityGroup
-    Properties:
-      Tags:
-      - Key: Product
-        Value: !Ref Product
-      VpcId: !Ref VPCSonar
-      GroupDescription: This security group is used to control access to the container
-      SecurityGroupIngress:
-      - IpProtocol: TCP
-        FromPort: 0
-        ToPort: 65535
-        CidrIp: 0.0.0.0/0
-
-  VPCEndpointS3:
-    Type: AWS::EC2::VPCEndpoint
-    Properties:
-      ServiceName: !Sub com.amazonaws.${AWS::Region}.s3
-      VpcEndpointType: Gateway
-      VpcId: !Ref VPCSonar
-      RouteTableIds:
-        - !Ref PrivateRouteTable1
-        - !Ref PrivateRouteTable2
-
-  VPCEndpointCloudwatchLogs:
-    Type: AWS::EC2::VPCEndpoint
-    Properties:
-      PrivateDnsEnabled: true
-      SecurityGroupIds:
-      - Ref: SgVPCEndpoints
-      ServiceName: !Sub com.amazonaws.${AWS::Region}.logs
-      SubnetIds:
-      - !Ref PrivateSubnet1
-      - !Ref PrivateSubnet2
-      VpcEndpointType: Interface
-      VpcId: !Ref VPCSonar
-
-
-
-  PrivateRouteTable1:
-    Type: AWS::EC2::RouteTable
-    Properties:
-      VpcId: !Ref VPCSonar
-
-  PrivateRouteTable1Association:
-    Type: AWS::EC2::SubnetRouteTableAssociation
-    Properties:
-      RouteTableId: !Ref PrivateRouteTable1
-      SubnetId: !Ref PrivateSubnet1
-
-  PrivateRouteTable2:
-    Type: AWS::EC2::RouteTable
-    Properties:
-      VpcId: !Ref VPCSonar
-
-  PrivateRouteTable2Association:
-    Type: AWS::EC2::SubnetRouteTableAssociation
-    Properties:
-      RouteTableId: !Ref PrivateRouteTable2
-      SubnetId: !Ref PrivateSubnet2
-
-Outputs:
-  VPCIDExport:
-    Value: !Ref VPCSonar
-    Export:
-      Name: !Sub "${AWS::StackName}-VPCID"
-  PrivateSubnet1Export:
-    Value: !Ref PrivateSubnet1
-    Export: 
-      Name: !Sub "${AWS::StackName}-PrivateSubnet1"
-  PrivateSubnet2Export:
-    Value: !Ref PrivateSubnet2
-    Export:
-      Name: !Sub "${AWS::StackName}-PrivateSubnet2"
-  SecurityGroupExport:
-    Value: !Ref SgVPCEndpoints
-    Export:
-      Name: !Sub "${AWS::StackName}-SgVPCEndpoints"
+  CfnLint: 
+    Type: AWS::CodeBuild::Project 
+    Properties: 
+      Description: CFN-Lint  
+      Source: 
+        Type: CODEPIPELINE 
+        BuildSpec: 'buildspec/buildspec-cfn-lint.yml' 
+      Environment: 
+        Type: LINUX_CONTAINER 
+        ComputeType: BUILD_GENERAL1_SMALL 
+        Image: !Sub ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/python:latest 
+      Artifacts: 
+        Type: CODEPIPELINE 
+      ServiceRole: !Ref PipelineRoleTeste
+      TimeoutInMinutes: 10 
+      VpcConfig: 
+        VpcId: !ImportValue vpc-sonar-VPCID
+        Subnets: 
+          - !ImportValue vpc-sonar-PrivateSubnet1
+          - !ImportValue vpc-sonar-PrivateSubnet2
+        SecurityGroupIds: 
+          - !ImportValue vpc-sonar-SgVPCEndpoints
+ 
+  CfnNag: 
+    Type: AWS::CodeBuild::Project 
+    Properties: 
+      Description: CFN_NAG  
+      Source: 
+        Type: CODEPIPELINE 
+        BuildSpec: 'buildspec/buildspec-cfn_nag.yml' 
+      Environment: 
+        Type: LINUX_CONTAINER 
+        ComputeType: BUILD_GENERAL1_SMALL 
+        Image: !Sub ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/ruby:latest 
+      Artifacts: 
+        Type: CODEPIPELINE 
+      ServiceRole: !Ref PipelineRoleTeste
+      TimeoutInMinutes: 10 
+      VpcConfig: 
+        VpcId: !ImportValue vpc-sonar-VPCID
+        Subnets: 
+          - !ImportValue vpc-sonar-PrivateSubnet1
+          - !ImportValue vpc-sonar-PrivateSubnet2
+        SecurityGroupIds: 
+          - !ImportValue vpc-sonar-SgVPCEndpoints
+ 
+  PipelineRoleTeste: 
+    Type: AWS::IAM::Role 
+    Properties: 
+      RoleName: PipelineRoleTeste
+      AssumeRolePolicyDocument: 
+        Version: 2012-10-17 
+        Statement: 
+          - 
+            Effect: Allow 
+            Principal: 
+              AWS: !Sub arn:aws:iam::${AWS::AccountId}:root
+              Service: 
+                - "codepipeline.amazonaws.com"
+                - "codebuild.amazonaws.com"
+                - "cloudformation.amazonaws.com"
+            Action: 
+              - "sts:AssumeRole"
+      Path: "/" 
+      Policies: 
+        - 
+          PolicyName: PipelinePolicyTeste
+          PolicyDocument: 
+            Version: 2012-10-17 
+            Statement: 
+              - 
+                Effect: Allow 
+                Resource: 
+                  - "*" 
+                Action: 
+                  - elasticloadbalancing:*
+                  - application-autoscaling:*
+                  - codepipeline:* 
+                  - cloudformation:*
+                  - cloudwatch:* 
+                  - events:* 
+                  - rds:*
+                  - secretsmanager:*
+                  - ecr:* 
+                  - ecs:* 
+                  - ec2:*
+                  - s3:*
+                  - iam:* 
+                  - logs:* 
+                  - codecommit:*
+                  - autoscaling:* 
+                  - codebuild:BatchGetBuilds 
+                  - codebuild:StartBuild 
+                  - iam:PassRole 
+                  - iam:ListRoles 
+                  - ssm:GetParameters
+                  - ssm:PutParameter
+                  - ssm:AddTagsToResource
+                  - kms:Encrypt 
+                  - kms:Decrypt 
+                  - kms:ReEncrypt* 
+                  - kms:GenerateDataKey* 
+                  - kms:DescribeKey 

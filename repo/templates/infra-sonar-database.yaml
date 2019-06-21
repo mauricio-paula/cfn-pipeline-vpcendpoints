@@ -1,0 +1,104 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Parameters:
+  SonarRDSName:
+    Type: String
+    Description: Nome DB Sonar
+    Default: sonardev
+  SonarRDSUsername:
+    Type: String
+    Description: Nome usuario
+    Default: sonaruser
+    NoEcho: true
+  SonarRDSInstanceType:
+    Type: String
+    Description: Tipo instancia RDS
+    Default: db.t2.small
+
+Resources:
+  SonarRDSSubnetGroup:
+    Type: "AWS::RDS::DBSubnetGroup"
+    Properties:
+      DBSubnetGroupDescription: Subnet Group for RDS instance
+      SubnetIds:
+        - !ImportValue vpc-sonar-PrivateSubnet1
+        - !ImportValue vpc-sonar-PrivateSubnet2
+
+  SonarDBSecurityGroup:
+    Type: "AWS::RDS::DBSecurityGroup"
+    Properties:
+      EC2VpcId: !ImportValue vpc-sonar-VPCID
+      GroupDescription: Ingress for Cidr
+      DBSecurityGroupIngress:
+        - CIDRIP: !ImportValue vpc-sonar-VPCIDCIDR
+
+  SonarRDSInstanceRotationSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Description: 'This is the secret for my RDS instance'
+      GenerateSecretString:
+        SecretStringTemplate: !Sub '{"username": "${SonarRDSUsername}"}'
+        GenerateStringKey: "password"
+        PasswordLength: 16
+        ExcludePunctuation: true
+
+  SonarRDSInstance:
+    Type: AWS::RDS::DBInstance
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: F23
+          - id: F24
+    Properties:
+      StorageEncrypted: true
+      AllocatedStorage: '30'
+      DBInstanceClass: !Ref SonarRDSInstanceType
+      Engine: postgres
+      EngineVersion: '10.6'
+      MasterUsername: !Join ['', ['{{resolve:secretsmanager:', !Ref SonarRDSInstanceRotationSecret, ':SecretString:username}}' ]]
+      MasterUserPassword: !Join ['', ['{{resolve:secretsmanager:', !Ref SonarRDSInstanceRotationSecret, ':SecretString:password}}' ]]
+      BackupRetentionPeriod: 15
+      DBInstanceIdentifier: !Ref SonarRDSName
+      DBName: !Ref SonarRDSName
+      MultiAZ: true
+      DBSubnetGroupName: !Ref SonarRDSSubnetGroup
+      PubliclyAccessible: false
+      DBSecurityGroups:
+        - !Ref SonarDBSecurityGroup
+
+  CriaSonarRDSNameParameter:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: "/sonar/SonarRDSName"
+      Type: "String"
+      Value: !Ref SonarRDSName
+      Description: "Nome banco RDS Sonar"
+
+  CriaSonarEndpointParameter:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: "/sonar/SonarEndpoint"
+      Type: "String"
+      Value: !GetAtt SonarRDSInstance.Endpoint.Address
+      Description: "Endpoint RDS Sonar"
+      
+  CriaSonarRotationParameter:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: "/sonar/SonarRDSInstanceRotationSecret"
+      Type: "String"
+      Value: !Ref SonarRDSInstanceRotationSecret
+      Description: "Secret Rotation RDS Sonar"
+        
+Outputs:
+  SonarRDSName:
+    Value: !Ref SonarRDSName
+    Export:
+      Name: SonarRDSName
+  SonarEndpoint:
+    Value: !GetAtt SonarRDSInstance.Endpoint.Address
+    Export:
+      Name: SonarEndpoint
+  SonarSonarRDSInstanceRotationSecret:
+    Value: !Ref SonarRDSInstanceRotationSecret
+    Export:
+      Name: SonarRDSInstanceRotationSecret
